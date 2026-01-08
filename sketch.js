@@ -1,105 +1,140 @@
 let vid, sh;
 let distortion = 0.35;
 
-let clickPos = [0.5, 0.5];
-let clickTime = -9999; // ms
-
-let slider, btnSave;
+let stage = "boot";
+let errMsg = "";
 
 function isMobile() {
   return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 function preload() {
-  sh = loadShader("ripple.vert", "ripple.frag");
+  stage = "preload";
+  try {
+    sh = loadShader("ripple.vert", "ripple.frag");
+  } catch (e) {
+    errMsg = "loadShader threw: " + e;
+    stage = "shader_load_fail";
+  }
 }
 
 function setup() {
   createCanvas(1102, 550, WEBGL);
   noStroke();
-
-  // Mobile perf
   if (isMobile()) pixelDensity(1);
 
+  stage = "setup";
+
   vid = createVideo("Colt_splashZone_1102x550.mp4", () => {
-    vid.loop();
-    vid.volume(0);
+    try {
+      vid.elt.muted = true;
+      vid.elt.playsInline = true;
+      vid.elt.setAttribute("muted", "");
+      vid.elt.setAttribute("playsinline", "");
+      vid.volume(0);
+      vid.loop();
+      const p = vid.elt.play();
+      if (p?.catch) p.catch(()=>{});
+    } catch(e) {}
   });
   vid.hide();
-
-  // Slider
-  slider = createSlider(0, 1, distortion, 0.001);
-  slider.addClass("p5-slider");
-  slider.position(12, 12);
-  slider.size(240);
-  slider.input(() => distortion = slider.value());
-
-  // Save button (mobile-safe)
-  btnSave = createButton("Save Frame");
-  btnSave.position(12, 44);
-  btnSave.mousePressed(saveFrameMobileSafe);
 }
 
-function saveFrameMobileSafe() {
-  // Render one frame on canvas, then export
-  // saveCanvas triggers download in most browsers.
-  // iOS Safari may block downloads; fallback opens image in new tab.
-  try {
-    saveCanvas("Colt_splashZone_frame", "png");
-  } catch (e) {
-    const c = document.querySelector("canvas");
-    const url = c.toDataURL("image/png");
-    window.open(url, "_blank");
-  }
-}
-
-function triggerShock(u, v) {
-  clickPos = [u, v];
-  clickTime = millis();
-}
-
-function mousePressed() {
-  const u = constrain(mouseX / width, 0, 1);
-  const v = constrain(mouseY / height, 0, 1);
-  triggerShock(u, v);
-}
-
-function touchStarted() {
-  // Use first touch for shockwave
-  const u = constrain((touches[0]?.x ?? mouseX) / width, 0, 1);
-  const v = constrain((touches[0]?.y ?? mouseY) / height, 0, 1);
-  triggerShock(u, v);
-  return false; // prevent page scroll on touch
+function drawText(msg) {
+  resetShader();
+  // WEBGL text draws in 3D space; easiest is draw a 2D overlay using an offscreen buffer
+  // Minimal: draw big rect with debug via default fill (no text). We'll use DOM instead.
 }
 
 function draw() {
-  shader(sh);
+  background(0);
 
-  const u = constrain(mouseX / width, 0, 1);
-  const v = constrain(mouseY / height, 0, 1);
+  // Stage A: prove sketch is running
+  // draw a visible rectangle so you don't depend on text
+  resetShader();
+  push();
+  translate(0, 0, 0);
+  fill(20);
+  rect(-width/2, -height/2, width, height);
+  pop();
 
-  // Radius expands to global at max
-  const localR = 0.18;
-  const globalR = 1.25;
-  const rN = lerp(localR, globalR, Math.pow(distortion, 1.15));
+  // Stage B: prove video is usable (draw without shader)
+  if (vid && vid.elt && vid.elt.readyState >= 2) {
+    stage = "video_ok";
+    push();
+    // draw video to the full canvas (no shader)
+    texture(vid);
+    beginShape();
+    vertex(-width/2, -height/2, 0, 0);
+    vertex( width/2, -height/2, 1, 0);
+    vertex( width/2,  height/2, 1, 1);
+    vertex(-width/2,  height/2, 0, 1);
+    endShape(CLOSE);
+    pop();
+  } else {
+    stage = "waiting_video";
+    return; // keep showing the gray rect until video is ready
+  }
 
-  // Amp scales up strongly at high slider
-  const ampScaled = lerp(0.03, 0.18, Math.pow(distortion, 1.35));
+  // Stage C: prove shader works (if shader fails, you'll still see raw video above)
+  if (!sh) { stage = "no_shader"; return; }
 
-  // Click age seconds
-  const age = (millis() - clickTime) / 1000.0;
+  try {
+    stage = "shader_try";
 
-  sh.setUniform("u_tex", vid);
-  sh.setUniform("u_mouse", [u, v]);
-  sh.setUniform("u_radius", rN);
-  sh.setUniform("u_amp", ampScaled);
-  sh.setUniform("u_time", millis() / 1000.0);
-  sh.setUniform("u_mix", distortion);
+    shader(sh);
 
-  sh.setUniform("u_clickPos", clickPos);
-  sh.setUniform("u_clickAge", age);
+    const mx = constrain(mouseX / width, 0, 1);
+    const my = constrain(mouseY / height, 0, 1);
 
-  sh.setUniform("u_mobile", isMobile() ? 1.0 : 0.0);
+    // simple parameters
+    const rN = 0.5;
+    const ampScaled = 0.08;
 
-  rect(-width / 2, -height / 2, width, height);
+    sh.setUniform("u_tex", vid);
+    sh.setUniform("u_mouse", [mx, my]);
+    sh.setUniform("u_radius", rN);
+    sh.setUniform("u_amp", ampScaled);
+    sh.setUniform("u_time", millis() / 1000.0);
+    sh.setUniform("u_mix", 1.0);
+
+    // if your frag includes these uniforms, set them too; otherwise comment them out
+    // (safe try/catch below if mismatch)
+    try {
+      sh.setUniform("u_clickPos", [0.5, 0.5]);
+      sh.setUniform("u_clickAge", 999.0);
+      sh.setUniform("u_mobile", isMobile() ? 1.0 : 0.0);
+    } catch(e) {}
+
+    rect(-width/2, -height/2, width, height);
+
+    stage = "shader_ok";
+  } catch (e) {
+    errMsg = "shader draw exception: " + e;
+    stage = "shader_runtime_fail";
+  }
 }
+
+// quick DOM debug overlay
+function keyPressed() {
+  console.log("stage:", stage, "err:", errMsg);
+}
+
+window.addEventListener("load", () => {
+  const d = document.createElement("div");
+  d.style.position = "absolute";
+  d.style.left = "10px";
+  d.style.bottom = "10px";
+  d.style.color = "white";
+  d.style.font = "12px monospace";
+  d.style.zIndex = "9999";
+  d.style.background = "rgba(0,0,0,0.5)";
+  d.style.padding = "6px 8px";
+  d.id = "dbg";
+  document.body.appendChild(d);
+
+  setInterval(() => {
+    const el = document.getElementById("dbg");
+    if (el) el.textContent = "stage: " + stage + (errMsg ? " | " + errMsg : "");
+  }, 200);
+});
