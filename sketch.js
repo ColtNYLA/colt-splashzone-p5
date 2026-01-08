@@ -1,21 +1,18 @@
 let vid, sh;
 let distortion = 0.35;
 
-let stage = "boot";
-let errMsg = "";
+let clickPos = [0.5, 0.5];
+let clickTime = -9999;
+
+let slider;
+let started = false;
 
 function isMobile() {
   return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
 function preload() {
-  stage = "preload";
-  try {
-    sh = loadShader("ripple.vert", "ripple.frag");
-  } catch (e) {
-    errMsg = "loadShader threw: " + e;
-    stage = "shader_load_fail";
-  }
+  sh = loadShader("ripple.vert", "ripple.frag");
 }
 
 function setup() {
@@ -23,118 +20,101 @@ function setup() {
   noStroke();
   if (isMobile()) pixelDensity(1);
 
-  stage = "setup";
+  // Slider (always create; DOM overlay)
+  slider = createSlider(0, 1, distortion, 0.001);
+  slider.addClass("p5-slider");
+  slider.position(12, 12);
+  slider.size(240);
+  slider.input(() => distortion = slider.value());
 
+  // Video
   vid = createVideo("Colt_splashZone_1102x550.mp4", () => {
-    try {
-      vid.elt.muted = true;
-      vid.elt.playsInline = true;
-      vid.elt.setAttribute("muted", "");
-      vid.elt.setAttribute("playsinline", "");
-      vid.volume(0);
-      vid.loop();
-      const p = vid.elt.play();
-      if (p?.catch) p.catch(()=>{});
-    } catch(e) {}
+    // mobile-safe flags
+    vid.elt.muted = true;
+    vid.elt.playsInline = true;
+    vid.elt.setAttribute("muted", "");
+    vid.elt.setAttribute("playsinline", "");
+    vid.volume(0);
+
+    tryStartVideo();
   });
   vid.hide();
 }
 
-function drawText(msg) {
-  resetShader();
-  // WEBGL text draws in 3D space; easiest is draw a 2D overlay using an offscreen buffer
-  // Minimal: draw big rect with debug via default fill (no text). We'll use DOM instead.
+function tryStartVideo() {
+  if (!vid) return;
+  const p = vid.elt.play();
+  if (p && p.then) {
+    p.then(() => { started = true; vid.loop(); })
+     .catch(() => { started = false; /* will start on click */ });
+  } else {
+    started = true;
+    vid.loop();
+  }
+}
+
+function triggerShock(u, v) {
+  clickPos = [u, v];
+  clickTime = millis();
+}
+
+function mousePressed() {
+  if (!started) tryStartVideo();
+
+  // mouseX/Y are top-left pixel coords even in WEBGL
+  const u = constrain(mouseX / width, 0, 1);
+  const v = constrain(mouseY / height, 0, 1);
+  triggerShock(u, v);
+}
+
+function touchStarted() {
+  if (!started) tryStartVideo();
+
+  const x = (touches[0]?.x ?? mouseX);
+  const y = (touches[0]?.y ?? mouseY);
+
+  const u = constrain(x / width, 0, 1);
+  const v = constrain(y / height, 0, 1);
+  triggerShock(u, v);
+
+  return false;
 }
 
 function draw() {
+  // No flicker: always draw something every frame
   background(0);
 
-  // Stage A: prove sketch is running
-  // draw a visible rectangle so you don't depend on text
-  resetShader();
-  push();
-  translate(0, 0, 0);
-  fill(20);
-  rect(-width/2, -height/2, width, height);
-  pop();
-
-  // Stage B: prove video is usable (draw without shader)
-  if (vid && vid.elt && vid.elt.readyState >= 2) {
-    stage = "video_ok";
-    push();
-    // draw video to the full canvas (no shader)
-    texture(vid);
-    beginShape();
-    vertex(-width/2, -height/2, 0, 0);
-    vertex( width/2, -height/2, 1, 0);
-    vertex( width/2,  height/2, 1, 1);
-    vertex(-width/2,  height/2, 0, 1);
-    endShape(CLOSE);
-    pop();
-  } else {
-    stage = "waiting_video";
-    return; // keep showing the gray rect until video is ready
+  // If video isn't ready yet, keep the last frame black + no return flicker
+  if (!vid || !vid.elt || vid.elt.readyState < 2) {
+    return;
   }
 
-  // Stage C: prove shader works (if shader fails, you'll still see raw video above)
-  if (!sh) { stage = "no_shader"; return; }
+  // Mouse in TOP-LEFT UV space to match ripple.frag's uv
+  const mx = constrain(mouseX / width, 0, 1);
+  const my = constrain(mouseY / height, 0, 1);
 
-  try {
-    stage = "shader_try";
+  const localR  = 0.18;
+  const globalR = 1.25;
+  const rN = lerp(localR, globalR, Math.pow(distortion, 1.15));
 
-    shader(sh);
+  const ampScaled = lerp(0.03, 0.18, Math.pow(distortion, 1.35));
 
-    const mx = constrain(mouseX / width, 0, 1);
-    const my = constrain(mouseY / height, 0, 1);
+  const age = (millis() - clickTime) / 1000.0;
 
-    // simple parameters
-    const rN = 0.5;
-    const ampScaled = 0.08;
+  shader(sh);
 
-    sh.setUniform("u_tex", vid);
-    sh.setUniform("u_mouse", [mx, my]);
-    sh.setUniform("u_radius", rN);
-    sh.setUniform("u_amp", ampScaled);
-    sh.setUniform("u_time", millis() / 1000.0);
-    sh.setUniform("u_mix", 1.0);
+  sh.setUniform("u_tex", vid);
+  sh.setUniform("u_mouse", [mx, my]);
+  sh.setUniform("u_radius", rN);
+  sh.setUniform("u_amp", ampScaled);
+  sh.setUniform("u_time", millis() / 1000.0);
+  sh.setUniform("u_mix", distortion);
 
-    // if your frag includes these uniforms, set them too; otherwise comment them out
-    // (safe try/catch below if mismatch)
-    try {
-      sh.setUniform("u_clickPos", [0.5, 0.5]);
-      sh.setUniform("u_clickAge", 999.0);
-      sh.setUniform("u_mobile", isMobile() ? 1.0 : 0.0);
-    } catch(e) {}
+  sh.setUniform("u_clickPos", clickPos);
+  sh.setUniform("u_clickAge", age);
 
-    rect(-width/2, -height/2, width, height);
+  sh.setUniform("u_mobile", isMobile() ? 1.0 : 0.0);
 
-    stage = "shader_ok";
-  } catch (e) {
-    errMsg = "shader draw exception: " + e;
-    stage = "shader_runtime_fail";
-  }
+  // draw full canvas in WEBGL space
+  rect(-width / 2, -height / 2, width, height);
 }
-
-// quick DOM debug overlay
-function keyPressed() {
-  console.log("stage:", stage, "err:", errMsg);
-}
-
-window.addEventListener("load", () => {
-  const d = document.createElement("div");
-  d.style.position = "absolute";
-  d.style.left = "10px";
-  d.style.bottom = "10px";
-  d.style.color = "white";
-  d.style.font = "12px monospace";
-  d.style.zIndex = "9999";
-  d.style.background = "rgba(0,0,0,0.5)";
-  d.style.padding = "6px 8px";
-  d.id = "dbg";
-  document.body.appendChild(d);
-
-  setInterval(() => {
-    const el = document.getElementById("dbg");
-    if (el) el.textContent = "stage: " + stage + (errMsg ? " | " + errMsg : "");
-  }, 200);
-});
